@@ -1,0 +1,98 @@
+* ============================================================================
+* 卷尺瑕疵检测补丁脚本 —— 场景 1
+* 目标：白色/黄色【背景区域】上的【浅色划痕 / 脏污】
+*       特征：与背景颜色差异很小(低对比度)、面积较小，AI 异常检测易漏检
+* 方法：背景光照估计(mean_image) + 动态阈值(dyn_threshold)
+*       不看绝对灰度，只看相对局部背景的偏差，适合低对比度小缺陷
+* 用法：HDevelop 中新建程序，粘贴本代码，按 F5 运行
+* ============================================================================
+*
+* ----------------------------------------------------------------------------
+* 0. 可调参数区(按真实图像微调，注释给出调参方向)
+* ----------------------------------------------------------------------------
+* 待检图像路径
+ImageFile := '1_4_20260529_134337.jpg'
+* 背景(白/黄)最低灰度，把背景从黑色刻度/数字中分出。白≈255, 黄≈200
+BackgroundMinGray := 150
+* 认定为"背景大块"的最小面积，用来剔除孤立亮噪点
+BGAreaMin := 3000
+* 背景ROI向内收缩半径，避开刻度线/数字/边框边缘(防误检)。边缘误检多→调大
+ErodeBGRadius := 6
+* 背景光照估计的均值滤波核(必须奇数)。划痕/脏污越大→调大；背景越不均匀→调大
+SmoothSize := 41
+* 比局部背景"暗"超过该灰度→判为脏污/偏暗划痕。越小越灵敏(也越易引入噪点)
+* 实测这条划痕很淡，默认给 6；若仍漏检降到 4~5，若噪点多升到 8~10
+OffsetDark := 6
+* 比局部背景"亮"超过该灰度→判为偏亮划痕。越小越灵敏
+OffsetLight := 6
+* 闭运算半径，连接断开的划痕段。划痕断续严重→调大
+CloseRadius := 2
+* 最小缺陷面积(像素)，过滤噪点
+MinDefectArea := 8
+* 最大缺陷面积(像素)，过大的交给已有AI异常检测处理
+MaxDefectArea := 5000
+*
+* ----------------------------------------------------------------------------
+* 1. 读图并转灰度
+* ----------------------------------------------------------------------------
+read_image (Image, ImageFile)
+count_channels (Image, Channels)
+if (Channels >= 3)
+    rgb1_to_gray (Image, GrayImage)
+else
+    copy_image (Image, GrayImage)
+endif
+get_image_size (GrayImage, Width, Height)
+*
+* ----------------------------------------------------------------------------
+* 2. 分离白/黄背景区域(排除黑色刻度、数字、边框)
+* ----------------------------------------------------------------------------
+* 2.1 取亮区：白和黄灰度都高，黑色标记灰度低，阈值即可分开
+threshold (GrayImage, BrightRegion, BackgroundMinGray, 255)
+* 2.2 取"背景大块"：填洞后连通，按面积保留主体，剔除孤立亮噪点
+fill_up (BrightRegion, BrightFilled)
+connection (BrightFilled, BrightConn)
+select_shape (BrightConn, BGLarge, 'area', 'and', BGAreaMin, 99999999)
+union1 (BGLarge, BGUnion)
+* 2.3 背景ROI向内收缩，避开黑色标记边缘(否则抗锯齿边会被当成亮/暗缺陷)
+erosion_circle (BrightRegion, BGCore, ErodeBGRadius)
+* 2.4 最终背景检测ROI = 收缩后的亮区核心，且落在背景主体内
+intersection (BGCore, BGUnion, BGRoi)
+*
+* ----------------------------------------------------------------------------
+* 3. 背景光照估计 + 动态阈值(核心：抓低对比度小缺陷)
+* ----------------------------------------------------------------------------
+reduce_domain (GrayImage, BGRoi, ImageRoi)
+* 大核均值 = 估计的"理想背景"(已平滑掉小缺陷)
+mean_image (ImageRoi, ImageMean, SmoothSize, SmoothSize)
+* 比局部背景暗→脏污；比局部背景亮→浅色划痕
+dyn_threshold (ImageRoi, ImageMean, RegDark, OffsetDark, 'dark')
+dyn_threshold (ImageRoi, ImageMean, RegLight, OffsetLight, 'light')
+union2 (RegDark, RegLight, RegDefectRaw)
+*
+* ----------------------------------------------------------------------------
+* 4. 形态学清理 + 尺寸筛选
+* ----------------------------------------------------------------------------
+* 注意：细划痕只有 1~2 像素宽，禁止用开运算(opening)去噪，否则会把划痕本身腐蚀掉
+* 这里改为：先闭运算把断开的划痕接起来，再连通后按面积过滤噪点
+closing_circle (RegDefectRaw, RegClosed, CloseRadius)
+connection (RegClosed, RegConn)
+select_shape (RegConn, RegDefect, 'area', 'and', MinDefectArea, MaxDefectArea)
+*
+* ----------------------------------------------------------------------------
+* 5. 结果显示 + 缺陷信息输出
+* ----------------------------------------------------------------------------
+dev_close_window ()
+dev_open_window_fit_image (Image, 0, 0, -1, -1, WindowHandle)
+dev_display (Image)
+dev_set_draw ('margin')
+dev_set_line_width (2)
+dev_set_color ('red')
+dev_display (RegDefect)
+count_obj (RegDefect, NumDefects)
+* 逐个输出缺陷的面积与中心坐标，便于后续与AI结果合并/上报
+for i := 1 to NumDefects by 1
+    select_obj (RegDefect, OneDefect, i)
+    area_center (OneDefect, DefArea, DefRow, DefCol)
+endfor
+* NumDefects=0 表示本场景未检出；可在变量窗口查看上面循环中的坐标
