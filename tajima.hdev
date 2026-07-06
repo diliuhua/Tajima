@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hdevelop file_version="1.2" halcon_version="24.11.1.0">
+<procedure name="main">
+<interface/>
+<body>
+<l> count_seconds (T1)</l>
+<l>dev_update_off ()</l>
+<c>* Normal region morphological parameters (smaller for finer details)</c>
+<l>NormalOpeningRadius := 3.0</l>
+<l>NormalClosingRadius := 6.0</l>
+<l>NormalErosionRadius := 1.5</l>
+<l>NormalMinArea := 10</l>
+<l>NormalMinCompactness := 1.3</l>
+<l>NormalMaxCompactness := 8.0</l>
+<l>NormalMinRatio := 0.3</l>
+<l>NormalMaxRatio := 3.0</l>
+<l>NormalMinConvexity := 0.7</l>
+<c></c>
+<c></c>
+<c>* </c>
+<c>* ** 1. Set image path to apply the inference **</c>
+<l>*read_image (Image, 'C:/Users/di.liuhua/Desktop/课题/AI/上表面/picture/1/1_831.jpg')</l>
+<l>read_image (Image, 'C:/Users/di.liuhua/Desktop/20260616_144553.7957_1_43_3-2-4-5.jpg')</l>
+<c></c>
+<c>* </c>
+<c>* ** 2. Read the model exported from the Deep Learning Tool **</c>
+<l>*PathToPreprocessParamFile := 'C:/Users/di.liuhua/Desktop/课题/AI/上表面/model/02品番-up-02轮-04_dl_preprocess_params.hdict'</l>
+<l>*PathToTrainedModel := 'C:/Users/di.liuhua/Desktop/课题/AI/上表面/model/02品番-up-02轮-04.hdl'</l>
+<l>PathToPreprocessParamFile := 'C:/Users/di.liuhua/Desktop/课题/AI/下表面/model/4th/3.hdict'</l>
+<l>PathToTrainedModel := 'C:/Users/di.liuhua/Desktop/课题/AI/下表面/model/4th/3.hdl'</l>
+<c></c>
+<c>* ========================================</c>
+<c>* Remove Vertical Streaks - Same method as Python</c>
+<c>* ========================================</c>
+<c>* Parameters</c>
+<l>BackgroundType := 'white'</l>
+<c>* Crop parameters for white background (pixels to remove)</c>
+<l>CropTopPixelsWhite := 0</l>
+<l>CropSidePixelsWhite := 0</l>
+<c>* Crop parameters for yellow background (pixels to remove)</c>
+<l>CropTopPixelsYellow := 0</l>
+<l>CropSidePixelsYellow := 0</l>
+<c></c>
+<c>* Select thresholds and crop parameters based on background type</c>
+<l>if (BackgroundType == 'white')</l>
+<l>    CropTopPixels := CropTopPixelsWhite</l>
+<l>    CropSidePixels := CropSidePixelsWhite</l>
+<l>else</l>
+<l>    CropTopPixels := CropTopPixelsYellow</l>
+<l>    CropSidePixels := CropSidePixelsYellow</l>
+<l>endif</l>
+<c></c>
+<c></c>
+<c>* Crop image (top and both sides)</c>
+<l>get_image_size (Image, ImgWidth, ImgHeight)</l>
+<l>gen_rectangle1 (ImageROI, CropTopPixels, CropSidePixels, ImgHeight-1, ImgWidth-1-CropSidePixels)</l>
+<l>reduce_domain (Image, ImageROI, ImageCropped)</l>
+<l>crop_domain (ImageCropped, Image)</l>
+<c>* Convert to grayscale</c>
+<l>count_channels (Image, Channels)</l>
+<l>if (Channels == 3)</l>
+<l>    rgb1_to_gray (Image, GrayImg)</l>
+<l>else</l>
+<l>    GrayImg := Image</l>
+<l>endif</l>
+<l>get_image_size (Image, Width, Height)</l>
+<c></c>
+<c></c>
+<c>* 背景是图像中占比最大的亮色区域，直方图中形成最高峰</c>
+<l>gray_histo(Image, Image, AbsoluteHisto, RelativeHisto)</l>
+<c>    * 找到直方图最大值对应的灰度（即背景峰值灰度）</c>
+<l>tuple_max(AbsoluteHisto, MaxCount)</l>
+<l>tuple_find(AbsoluteHisto, MaxCount, PeakGray)</l>
+<c>* 取峰值灰度的80%作为背景阈值，低于此值的认为是刻度线/瑕疵</c>
+<l>Background_Threshold := int(PeakGray[0] * 0.7)</l>
+<c></c>
+<c>* Create background mask</c>
+<l>threshold (GrayImg, BackgroundRegion, Background_Threshold, 255)</l>
+<c>* Calculate column median from background pixels</c>
+<l>area_center (BackgroundRegion, AreaBg, RowTmp, ColTmp)</l>
+<l>if (AreaBg == 0)</l>
+<c>    * No background, skip</c>
+<l>    GlobalMedian := 128</l>
+<l>else</l>
+<l>    reduce_domain (GrayImg, BackgroundRegion, GrayBg)</l>
+<l>    intensity (GrayBg, GrayBg, GlobalMedian, Dev)</l>
+<l>endif</l>
+<c>* Build column median array - 优化版本</c>
+<l>tuple_gen_const (Width, GlobalMedian, ColMedianArr)</l>
+<c></c>
+<c>* 方法：将背景区域按列分割，批量计算每列均值</c>
+<c>* 使用 region_to_bin 将背景区域转为二值图像，然后计算列和</c>
+<l>region_to_bin (BackgroundRegion, BgBinImage, 1, 0, Width, Height)</l>
+<c></c>
+<c>* 计算每列背景像素数（列求和）</c>
+<l>gray_projections (BackgroundRegion, BgBinImage, 'simple', HorSum1, VertSum1)</l>
+<l>gray_projections (BackgroundRegion, GrayImg, 'simple', HorGraySum, VertGraySum)</l>
+<c></c>
+<c>* 计算列均值 - 向量化计算，避免除零</c>
+<l>VertSum1Safe := VertSum1 + (VertSum1 == 0)</l>
+<l>ColMedianArr := VertGraySum / VertSum1Safe</l>
+<l>ColMedianArr[VertSum1 == 0] := GlobalMedian</l>
+<c></c>
+<c>* Calculate scale factors - 向量化计算</c>
+<l>ScaleFactorArr := GlobalMedian / ColMedianArr</l>
+<c>* Apply normalization to each channel</c>
+<c></c>
+<l>if (Channels == 3)</l>
+<l>    decompose3 (Image, ImgR, ImgG, ImgB)</l>
+<l>    convert_image_type (ImgR, ImgRReal, 'real')</l>
+<l>    convert_image_type (ImgG, ImgGReal, 'real')</l>
+<l>    convert_image_type (ImgB, ImgBReal, 'real')</l>
+<l>    for Col := 0 to Width - 1 by 1</l>
+<l>        SF := ScaleFactorArr[Col]</l>
+<l>        gen_rectangle1 (ColRoi, 0, Col, Height-1, Col)</l>
+<l>        reduce_domain (ImgRReal, ColRoi, TmpR)</l>
+<l>        scale_image (TmpR, TmpR, SF, 0)</l>
+<l>        overpaint_gray (ImgRReal, TmpR)</l>
+<l>        reduce_domain (ImgGReal, ColRoi, TmpG)</l>
+<l>        scale_image (TmpG, TmpG, SF, 0)</l>
+<l>        overpaint_gray (ImgGReal, TmpG)</l>
+<l>        reduce_domain (ImgBReal, ColRoi, TmpB)</l>
+<l>        scale_image (TmpB, TmpB, SF, 0)</l>
+<l>        overpaint_gray (ImgBReal, TmpB)</l>
+<l>    endfor</l>
+<l>    min_max_gray (ImgRReal, ImgRReal, 0, MinR, MaxR, RangeR)</l>
+<l>    min_max_gray (ImgGReal, ImgGReal, 0, MinG, MaxG, RangeG)</l>
+<l>    min_max_gray (ImgBReal, ImgBReal, 0, MinB, MaxB, RangeB)</l>
+<l>    MaxVal := max([MaxR, MaxG, MaxB])</l>
+<l>    if (MaxVal &gt; 255)</l>
+<l>        SF := 255.0 / MaxVal</l>
+<l>        scale_image (ImgRReal, ImgRReal, SF, 0)</l>
+<l>        scale_image (ImgGReal, ImgGReal, SF, 0)</l>
+<l>        scale_image (ImgBReal, ImgBReal, SF, 0)</l>
+<l>    endif</l>
+<l>    convert_image_type (ImgRReal, ImgR, 'byte')</l>
+<l>    convert_image_type (ImgGReal, ImgG, 'byte')</l>
+<l>    convert_image_type (ImgBReal, ImgB, 'byte')</l>
+<l>    compose3 (ImgR, ImgG, ImgB, Image)</l>
+<l>else</l>
+<l>    convert_image_type (Image, ImageReal, 'real')</l>
+<c>    * 使用 procedure 封装处理逻辑</c>
+<l>    scale_channel_proc (ImageReal, ScaleFactorArr, Width, Height)</l>
+<l>    min_max_gray (ImageReal, ImageReal, 0, MinV, MaxV, RangeV)</l>
+<l>    if (MaxV &gt; 255)</l>
+<l>        scale_image (ImageReal, ImageReal, 255.0/MaxV, 0)</l>
+<l>    endif</l>
+<l>    convert_image_type (ImageReal, Image, 'byte')</l>
+<l>endif</l>
+<l> count_seconds (T2)</l>
+<l> totaltime := T2-T1</l>
+<c>* ========================================</c>
+<c>* Read the preprocessing parameters and the model trained with the DLT.</c>
+<l>read_dict (PathToPreprocessParamFile, [], [], DLPreprocessParam)</l>
+<l>read_dl_model (PathToTrainedModel, DLModelHandle)</l>
+<c></c>
+<c>*</c>
+<c>* ** 3. Query the device and set model parameters **</c>
+<c>* </c>
+<c>* Inference with a deep-learning-based classifier can be done</c>
+<c>* on different devices. See the respective system requirements</c>
+<c>* in the Installation Guide.</c>
+<c>* If possible a GPU is used in this example.</c>
+<c>* In case you explicitly wish to run this example on the CPU,</c>
+<c>* choose the CPU device instead.</c>
+<l>query_available_dl_devices (['runtime', 'runtime'], ['gpu', 'cpu'], DLDeviceHandles)</l>
+<l>if (|DLDeviceHandles| == 0)</l>
+<l>    throw ('No supported device found to continue this example.')</l>
+<l>endif</l>
+<c>* Due to the filter used in query_available_dl_devices, the first device is a GPU, if available.</c>
+<l>DLDevice := DLDeviceHandles[0]</l>
+<c>* </c>
+<c>* Set desired batch size.</c>
+<l>BatchSizeInference := 1</l>
+<l>set_dl_model_param (DLModelHandle, 'batch_size', BatchSizeInference)</l>
+<l>set_dl_model_param (DLModelHandle, 'device', DLDevice)</l>
+<c></c>
+<l>get_dl_model_param (DLModelHandle, 'meta_data', MetaData)</l>
+<l>InferenceSegmentationThreshold := 8.0</l>
+<c></c>
+<c>* Create dictionary with dataset parameters used for display.</c>
+<l>DLDatasetInfo := dict{class_names: ['ok', 'nok'], class_ids: [0, 1]}</l>
+<c></c>
+<c>* Apply the trained model from the DLT to some randomly chosen example images.</c>
+<l>WindowDict := dict{}</l>
+<l>gen_dl_samples_from_images (Image, DLSample)</l>
+<l>preprocess_dl_samples (DLSample, DLPreprocessParam)</l>
+<l>apply_dl_model (DLModelHandle, DLSample, [], DLResult)</l>
+<c>* </c>
+<c>* Some post-processing can be added at this point if needed.</c>
+<c>* For the visualization the procedure dev_display_dl_data is used.</c>
+<c>* 'anomaly_image'</c>
+<c>* Display the single samples of this batch with their inferred class.</c>
+<c>* Open new window for full domain results.</c>
+<l>for SampleIndex := 0 to BatchSizeInference - 1 by 1</l>
+<c>    * Display the inference result.</c>
+<l>     dev_display_dl_data (DLSample, DLResult, DLDatasetInfo, ['anomaly_result', 'anomaly_image'], [], WindowDict)</l>
+<c>    * Extract anomaly results using direct property access (HALCON 24.11 syntax)</c>
+<l>    AnomalyImage := DLResult.anomaly_image</l>
+<l>    AnomalyScore := DLResult.anomaly_score</l>
+<l>    threshold (AnomalyImage, AnomalyRegion, InferenceSegmentationThreshold, 255)</l>
+<l>    overpaint_region (Image, AnomalyRegion, [255,0,0], 'margin')</l>
+<c>    * Apply enhanced morphological processing for AI results</c>
+<l>    opening_circle (AnomalyRegion, CleanedAnomalyRegion, NormalOpeningRadius)</l>
+<l>    closing_circle (CleanedAnomalyRegion, FinalAnomalyRegion, NormalClosingRadius)</l>
+<c>    * Additional erosion-dilation for normal regions</c>
+<l>    erosion_circle (FinalAnomalyRegion, NormalErodedRegion, NormalErosionRadius)</l>
+<l>    dilation_circle (NormalErodedRegion, FinalAnomalyRegion, NormalErosionRadius)</l>
+<l>    connection (FinalAnomalyRegion, NormalConnectedDefects)</l>
+<c>    * Enhanced shape filtering for normal region deformation artifacts</c>
+<l>    select_shape (NormalConnectedDefects, NormalFilteredDefects, 'area', 'and', NormalMinArea, 99999)</l>
+<l>    select_shape (NormalFilteredDefects, NormalFilteredDefects, 'compactness', 'and', NormalMinCompactness, NormalMaxCompactness)</l>
+<c>    * Filter out elongated deformation artifacts in normal regions</c>
+<l>    select_shape (NormalFilteredDefects, NormalFilteredDefects, 'ratio', 'and', NormalMinRatio, NormalMaxRatio)</l>
+<c>    * Filter by convexity for normal regions</c>
+<l>    select_shape (NormalFilteredDefects, NormalFilteredDefects, 'convexity', 'and', NormalMinConvexity, 1.0)</l>
+<l>    count_obj (NormalFilteredDefects, NormalDefectCount)</l>
+<l>    stop ()</l>
+<l>endfor</l>
+<c></c>
+<l>dev_close_window_dict (WindowDict)</l>
+</body>
+<docu id="main">
+<parameters/>
+</docu>
+</procedure>
+<procedure name="scale_channel_proc">
+<interface>
+<ic>
+<par name="ImgChannel" base_type="iconic" dimension="0"/>
+<par name="ScaleFactors" base_type="ctrl" dimension="0"/>
+<par name="ImgWidth" base_type="ctrl" dimension="0"/>
+<par name="ImgHeight" base_type="ctrl" dimension="0"/>
+</ic>
+</interface>
+<body>
+<c>* Apply column-wise scaling to a single channel</c>
+<l>for Col := 0 to ImgWidth - 1 by 1</l>
+<l>    SF := ScaleFactors[Col]</l>
+<l>    gen_rectangle1 (ColRoi, 0, Col, ImgHeight-1, Col)</l>
+<l>    reduce_domain (ImgChannel, ColRoi, TmpImg)</l>
+<l>    scale_image (TmpImg, TmpImg, SF, 0)</l>
+<l>    overpaint_gray (ImgChannel, TmpImg)</l>
+<l>endfor</l>
+<l>return ()</l>
+</body>
+<docu id="scale_channel_proc">
+<parameters>
+<parameter id="ImgChannel"/>
+<parameter id="ImgHeight"/>
+<parameter id="ImgWidth"/>
+<parameter id="ScaleFactors"/>
+</parameters>
+</docu>
+</procedure>
+<procedure name="scale_block_proc">
+<interface>
+<ic>
+<par name="ImgR" base_type="iconic" dimension="0"/>
+<par name="ImgG" base_type="iconic" dimension="0"/>
+<par name="ImgB" base_type="iconic" dimension="0"/>
+<par name="ScaleFactors" base_type="ctrl" dimension="0"/>
+<par name="ImgHeight" base_type="ctrl" dimension="0"/>
+<par name="StartCol" base_type="ctrl" dimension="0"/>
+<par name="EndCol" base_type="ctrl" dimension="0"/>
+</ic>
+</interface>
+<body>
+<c>* Process a block of columns for RGB channels</c>
+<l>for Col := StartCol to EndCol by 1</l>
+<l>    SF := ScaleFactors[Col]</l>
+<l>    gen_rectangle1 (ColRoi, 0, Col, ImgHeight-1, Col)</l>
+<l>    reduce_domain (ImgR, ColRoi, TmpR)</l>
+<l>    scale_image (TmpR, TmpR, SF, 0)</l>
+<l>    overpaint_gray (ImgR, TmpR)</l>
+<l>    reduce_domain (ImgG, ColRoi, TmpG)</l>
+<l>    scale_image (TmpG, TmpG, SF, 0)</l>
+<l>    overpaint_gray (ImgG, TmpG)</l>
+<l>    reduce_domain (ImgB, ColRoi, TmpB)</l>
+<l>    scale_image (TmpB, TmpB, SF, 0)</l>
+<l>    overpaint_gray (ImgB, TmpB)</l>
+<l>endfor</l>
+<l>return ()</l>
+</body>
+<docu id="scale_block_proc">
+<parameters>
+<parameter id="EndCol"/>
+<parameter id="ImgB"/>
+<parameter id="ImgG"/>
+<parameter id="ImgHeight"/>
+<parameter id="ImgR"/>
+<parameter id="ScaleFactors"/>
+<parameter id="StartCol"/>
+</parameters>
+</docu>
+</procedure>
+<procedure name="get_example_inference_images">
+<interface>
+<ic>
+<par name="ImageDir" base_type="ctrl" dimension="0"/>
+<par name="NumSamples" base_type="ctrl" dimension="0"/>
+</ic>
+<oc>
+<par name="ImageFiles" base_type="ctrl" dimension="0"/>
+</oc>
+</interface>
+<body>
+<c>* This procedure creates a list of images used for this example.</c>
+<c>* </c>
+<l>list_image_files (ImageDir, 'default', 'recursive', ImageFilesAll)</l>
+<l>tuple_shuffle (ImageFilesAll, ImageFilesAll)</l>
+<l>ImageFiles := ImageFilesAll[0:NumSamples - 1]</l>
+<c>* </c>
+<l>return ()</l>
+</body>
+<docu id="get_example_inference_images">
+<parameters>
+<parameter id="ImageDir"/>
+<parameter id="ImageFiles"/>
+<parameter id="NumSamples"/>
+</parameters>
+</docu>
+</procedure>
+</hdevelop>
