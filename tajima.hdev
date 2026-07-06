@@ -105,24 +105,25 @@
 <l>ScaleFactorArr := GlobalMedian / ColMedianArr</l>
 <c>* Apply normalization to each channel</c>
 <c></c>
+<c>* === Optimized: replace per-column loop with scale factor image multiplication ===</c>
+<c>* Build a scale factor image: each column has its ScaleFactor value, replicated across all rows</c>
 <l>if (Channels == 3)</l>
 <l>    decompose3 (Image, ImgR, ImgG, ImgB)</l>
 <l>    convert_image_type (ImgR, ImgRReal, 'real')</l>
 <l>    convert_image_type (ImgG, ImgGReal, 'real')</l>
 <l>    convert_image_type (ImgB, ImgBReal, 'real')</l>
+<c>    * Create a 1-row real image from ScaleFactorArr, then zoom to full height</c>
+<l>    gen_image1 (ScaleRowImg, 'real', Width, 1)</l>
 <l>    for Col := 0 to Width - 1 by 1</l>
-<l>        SF := ScaleFactorArr[Col]</l>
-<l>        gen_rectangle1 (ColRoi, 0, Col, Height-1, Col)</l>
-<l>        reduce_domain (ImgRReal, ColRoi, TmpR)</l>
-<l>        scale_image (TmpR, TmpR, SF, 0)</l>
-<l>        overpaint_gray (ImgRReal, TmpR)</l>
-<l>        reduce_domain (ImgGReal, ColRoi, TmpG)</l>
-<l>        scale_image (TmpG, TmpG, SF, 0)</l>
-<l>        overpaint_gray (ImgGReal, TmpG)</l>
-<l>        reduce_domain (ImgBReal, ColRoi, TmpB)</l>
-<l>        scale_image (TmpB, TmpB, SF, 0)</l>
-<l>        overpaint_gray (ImgBReal, TmpB)</l>
+<l>        set_grayval (ScaleRowImg, 0, Col, ScaleFactorArr[Col])</l>
 <l>    endfor</l>
+<l>    zoom_image_size (ScaleRowImg, ScaleFactorImg, Width, Height, 'nearest_neighbor')</l>
+<c>    * Multiply each channel by scale factor image in parallel (par_start/par_join)</c>
+<l>    par_start&lt;ThreadR&gt; : mult_image (ImgRReal, ScaleFactorImg, ImgRReal, 1.0, 0)</l>
+<l>    par_start&lt;ThreadG&gt; : mult_image (ImgGReal, ScaleFactorImg, ImgGReal, 1.0, 0)</l>
+<l>    par_start&lt;ThreadB&gt; : mult_image (ImgBReal, ScaleFactorImg, ImgBReal, 1.0, 0)</l>
+<l>    par_join ([ThreadR, ThreadG, ThreadB])</l>
+<c>    * Clamp to [0, 255] range</c>
 <l>    min_max_gray (ImgRReal, ImgRReal, 0, MinR, MaxR, RangeR)</l>
 <l>    min_max_gray (ImgGReal, ImgGReal, 0, MinG, MaxG, RangeG)</l>
 <l>    min_max_gray (ImgBReal, ImgBReal, 0, MinB, MaxB, RangeB)</l>
