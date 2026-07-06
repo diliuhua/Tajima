@@ -112,11 +112,13 @@
 <l>    convert_image_type (ImgR, ImgRReal, 'real')</l>
 <l>    convert_image_type (ImgG, ImgGReal, 'real')</l>
 <l>    convert_image_type (ImgB, ImgBReal, 'real')</l>
-<c>    * Create a 1-row real image from ScaleFactorArr, then zoom to full height</c>
-<l>    gen_image1 (ScaleRowImg, 'real', Width, 1)</l>
-<l>    for Col := 0 to Width - 1 by 1</l>
-<l>        set_grayval (ScaleRowImg, 0, Col, ScaleFactorArr[Col])</l>
-<l>    endfor</l>
+<c>    * Build scale factor image using gen_image_const (HDevelop compatible)</c>
+<c>    * Step 1: Create a 1-row real image and set scale factor values (vectorized)</c>
+<l>    gen_image_const (ScaleRowImg, 'real', Width, 1)</l>
+<l>    tuple_gen_const (Width, 0, RowIndices)</l>
+<l>    tuple_gen_sequence (0, Width - 1, 1, ColIndices)</l>
+<l>    set_grayval (ScaleRowImg, RowIndices, ColIndices, ScaleFactorArr)</l>
+<c>    * Step 2: Zoom the 1-row image to full height (nearest neighbor replicates rows)</c>
 <l>    zoom_image_size (ScaleRowImg, ScaleFactorImg, Width, Height, 'nearest_neighbor')</l>
 <c>    * Multiply each channel by scale factor image in parallel (par_start/par_join)</c>
 <l>    par_start&lt;ThreadR&gt; : mult_image (ImgRReal, ScaleFactorImg, ImgRReal, 1.0, 0)</l>
