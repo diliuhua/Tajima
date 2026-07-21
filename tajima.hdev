@@ -34,6 +34,8 @@
 <c>* ========================================</c>
 <c>* Parameters</c>
 <l>BackgroundType := 'white'</l>
+<c>* 高亮瑕疵保留阈值：灰度大于该值的像素视为局部高亮瑕疵，需保留其原始信息</c>
+<l>HighlightGrayThreshold := 230</l>
 <c>* Crop parameters for white background (pixels to remove)</c>
 <l>CropTopPixelsWhite := 0</l>
 <l>CropSidePixelsWhite := 0</l>
@@ -76,13 +78,17 @@
 <c></c>
 <c>* Create background mask</c>
 <l>threshold (GrayImg, BackgroundRegion, Background_Threshold, 255)</l>
+<c>* 检测局部高亮瑕疵（灰度 &gt; HighlightGrayThreshold），后续保留其原始信息</c>
+<l>threshold (GrayImg, HighlightRegion, HighlightGrayThreshold + 1, 255)</l>
+<c>* 计算背景亮度统计时排除高亮瑕疵，避免其拉高背景均值、干扰列归一化</c>
+<l>difference (BackgroundRegion, HighlightRegion, BackgroundForStats)</l>
 <c>* Calculate column median from background pixels</c>
-<l>area_center (BackgroundRegion, AreaBg, RowTmp, ColTmp)</l>
+<l>area_center (BackgroundForStats, AreaBg, RowTmp, ColTmp)</l>
 <l>if (AreaBg == 0)</l>
 <c>    * No background, skip</c>
 <l>    GlobalMedian := 128</l>
 <l>else</l>
-<l>    reduce_domain (GrayImg, BackgroundRegion, GrayBg)</l>
+<l>    reduce_domain (GrayImg, BackgroundForStats, GrayBg)</l>
 <l>    intensity (GrayBg, GrayBg, GlobalMedian, Dev)</l>
 <l>endif</l>
 <c>* Build column median array - 优化版本</c>
@@ -90,11 +96,11 @@
 <c></c>
 <c>* 方法：将背景区域按列分割，批量计算每列均值</c>
 <c>* 使用 region_to_bin 将背景区域转为二值图像，然后计算列和</c>
-<l>region_to_bin (BackgroundRegion, BgBinImage, 1, 0, Width, Height)</l>
+<l>region_to_bin (BackgroundForStats, BgBinImage, 1, 0, Width, Height)</l>
 <c></c>
 <c>* 计算每列背景像素数（列求和）</c>
-<l>gray_projections (BackgroundRegion, BgBinImage, 'simple', HorSum1, VertSum1)</l>
-<l>gray_projections (BackgroundRegion, GrayImg, 'simple', HorGraySum, VertGraySum)</l>
+<l>gray_projections (BackgroundForStats, BgBinImage, 'simple', HorSum1, VertSum1)</l>
+<l>gray_projections (BackgroundForStats, GrayImg, 'simple', HorGraySum, VertGraySum)</l>
 <c></c>
 <c>* 计算列均值 - 向量化计算，避免除零</c>
 <l>VertSum1Safe := VertSum1 + (VertSum1 == 0)</l>
@@ -105,27 +111,26 @@
 <l>ScaleFactorArr := GlobalMedian / ColMedianArr</l>
 <c>* Apply normalization to each channel</c>
 <c></c>
-<c>* === Optimized: replace per-column loop with scale factor image multiplication ===</c>
-<c>* Build a scale factor image: each column has its ScaleFactor value, replicated across all rows</c>
+<c>* === 构建列缩放因子图像（将每列因子沿列方向复制到整幅高度）===</c>
+<l>gen_image_const (ScaleRowImg, 'real', Width, 1)</l>
+<l>tuple_gen_const (Width, 0, RowIndices)</l>
+<l>tuple_gen_sequence (0, Width - 1, 1, ColIndices)</l>
+<l>set_grayval (ScaleRowImg, RowIndices, ColIndices, ScaleFactorArr)</l>
+<l>zoom_image_size (ScaleRowImg, ScaleFactorImg, Width, Height, 'nearest_neighbor')</l>
+<c>* 在高亮瑕疵区域将缩放因子置为 1.0：既不改变其亮度，又避免其被放大后拉高整体最大值导致全图变暗</c>
+<l>paint_region (HighlightRegion, ScaleFactorImg, ScaleFactorImgKeep, 1.0, 'fill')</l>
+<c>* Apply normalization to each channel</c>
 <l>if (Channels == 3)</l>
 <l>    decompose3 (Image, ImgR, ImgG, ImgB)</l>
 <l>    convert_image_type (ImgR, ImgRReal, 'real')</l>
 <l>    convert_image_type (ImgG, ImgGReal, 'real')</l>
 <l>    convert_image_type (ImgB, ImgBReal, 'real')</l>
-<c>    * Build scale factor image using gen_image_const (HDevelop compatible)</c>
-<c>    * Step 1: Create a 1-row real image and set scale factor values (vectorized)</c>
-<l>    gen_image_const (ScaleRowImg, 'real', Width, 1)</l>
-<l>    tuple_gen_const (Width, 0, RowIndices)</l>
-<l>    tuple_gen_sequence (0, Width - 1, 1, ColIndices)</l>
-<l>    set_grayval (ScaleRowImg, RowIndices, ColIndices, ScaleFactorArr)</l>
-<c>    * Step 2: Zoom the 1-row image to full height (nearest neighbor replicates rows)</c>
-<l>    zoom_image_size (ScaleRowImg, ScaleFactorImg, Width, Height, 'nearest_neighbor')</l>
-<c>    * Multiply each channel by scale factor image in parallel (par_start/par_join)</c>
-<l>    par_start&lt;ThreadR&gt; : mult_image (ImgRReal, ScaleFactorImg, ImgRReal, 1.0, 0)</l>
-<l>    par_start&lt;ThreadG&gt; : mult_image (ImgGReal, ScaleFactorImg, ImgGReal, 1.0, 0)</l>
-<l>    par_start&lt;ThreadB&gt; : mult_image (ImgBReal, ScaleFactorImg, ImgBReal, 1.0, 0)</l>
+<c>    * 三通道并行乘以缩放因子图像</c>
+<l>    par_start&lt;ThreadR&gt; : mult_image (ImgRReal, ScaleFactorImgKeep, ImgRReal, 1.0, 0)</l>
+<l>    par_start&lt;ThreadG&gt; : mult_image (ImgGReal, ScaleFactorImgKeep, ImgGReal, 1.0, 0)</l>
+<l>    par_start&lt;ThreadB&gt; : mult_image (ImgBReal, ScaleFactorImgKeep, ImgBReal, 1.0, 0)</l>
 <l>    par_join ([ThreadR, ThreadG, ThreadB])</l>
-<c>    * Clamp to [0, 255] range</c>
+<c>    * 归一化到 [0, 255]（高亮瑕疵因子为1.0，不会异常拉高最大值）</c>
 <l>    min_max_gray (ImgRReal, ImgRReal, 0, MinR, MaxR, RangeR)</l>
 <l>    min_max_gray (ImgGReal, ImgGReal, 0, MinG, MaxG, RangeG)</l>
 <l>    min_max_gray (ImgBReal, ImgBReal, 0, MinB, MaxB, RangeB)</l>
@@ -136,19 +141,28 @@
 <l>        scale_image (ImgGReal, ImgGReal, SF, 0)</l>
 <l>        scale_image (ImgBReal, ImgBReal, SF, 0)</l>
 <l>    endif</l>
-<l>    convert_image_type (ImgRReal, ImgR, 'byte')</l>
-<l>    convert_image_type (ImgGReal, ImgG, 'byte')</l>
-<l>    convert_image_type (ImgBReal, ImgB, 'byte')</l>
-<l>    compose3 (ImgR, ImgG, ImgB, Image)</l>
+<l>    convert_image_type (ImgRReal, NormR, 'byte')</l>
+<l>    convert_image_type (ImgGReal, NormG, 'byte')</l>
+<l>    convert_image_type (ImgBReal, NormB, 'byte')</l>
+<c>    * 用原始像素值覆盖高亮瑕疵处，确保其信息被完整保留（不受归一化及整体缩放影响）</c>
+<l>    reduce_domain (ImgR, HighlightRegion, HiR)</l>
+<l>    reduce_domain (ImgG, HighlightRegion, HiG)</l>
+<l>    reduce_domain (ImgB, HighlightRegion, HiB)</l>
+<l>    overpaint_gray (NormR, HiR)</l>
+<l>    overpaint_gray (NormG, HiG)</l>
+<l>    overpaint_gray (NormB, HiB)</l>
+<l>    compose3 (NormR, NormG, NormB, Image)</l>
 <l>else</l>
 <l>    convert_image_type (Image, ImageReal, 'real')</l>
-<c>    * 使用 procedure 封装处理逻辑</c>
-<l>    scale_channel_proc (ImageReal, ScaleFactorArr, Width, Height)</l>
+<l>    mult_image (ImageReal, ScaleFactorImgKeep, ImageReal, 1.0, 0)</l>
 <l>    min_max_gray (ImageReal, ImageReal, 0, MinV, MaxV, RangeV)</l>
 <l>    if (MaxV &gt; 255)</l>
 <l>        scale_image (ImageReal, ImageReal, 255.0/MaxV, 0)</l>
 <l>    endif</l>
 <l>    convert_image_type (ImageReal, Image, 'byte')</l>
+<c>    * 保留高亮瑕疵原始灰度</c>
+<l>    reduce_domain (GrayImg, HighlightRegion, HighlightGrayOrig)</l>
+<l>    overpaint_gray (Image, HighlightGrayOrig)</l>
 <l>endif</l>
 <l> count_seconds (T2)</l>
 <l> totaltime := T2-T1</l>
